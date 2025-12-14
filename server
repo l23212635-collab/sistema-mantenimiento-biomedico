@@ -1,0 +1,908 @@
+const express = require('express');
+const app = express();
+const path = require('path');
+const bodyParser = require('body-parser');
+const mysql = require('mysql2');
+const port = process.env.PORT || 3000; // Puerto desde .env o valor por defecto
+const bcrypt = require('bcrypt');
+const multer = require('multer');
+const xlsx = require('xlsx');
+const session = require('express-session');
+require('dotenv').config();
+
+// ------------------- MIDDLEWAREhola -------------------
+
+// Middleware para rutas protegidas: requiere login y deshabilita cachee
+function requireLogin(req, res, next) {
+  if (!req.session.user) {
+    return res.redirect('/login.html');
+  }
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  next();
+}
+
+function requireRole(roles) {
+  return (req, res, next) => {
+    const allowedRoles = Array.isArray(roles) ? roles : [roles];
+    if (req.session.user && allowedRoles.includes(req.session.user.tipo_usuario)) {
+      next();
+    } else {
+      res.status(403).sendFile(path.join(__dirname, 'public', 'acceso_denegado.html'));
+    }
+  };
+}
+
+
+
+// Configuración de la sesión
+app.use(session({
+  secret: 'secretKey',
+  resave: false,
+  saveUninitialized: false,
+}));
+
+// Parseo de formularios
+app.use(bodyParser.urlencoded({ extended: true }));
+// Parseo de JSON (para datos enviados desde fetch o APIs)
+app.use(express.json());
+
+// Servir archivos estáticos
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ------------------- CONEXIÓN A MYSQL -------------------
+const connection = mysql.createConnection({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+ timezone: '-08:00'
+});
+
+connection.connect(err => {
+  if (err) {
+    console.error('Error conectando a MySQL:', err);
+    return;
+  }
+  console.log('Conexión exitosa a MySQL');
+});
+
+// ------------------- RUTAS PROTEGIDAS -------------------
+//
+// Página principal
+app.get('/', requireLogin, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Guardar paciente
+app.post('/submit-data', requireLogin, requireRole(['medico','admin' ]),(req, res) => {
+  const { name, age, heart_rate } = req.body;
+  const query = 'INSERT INTO pacientes (nombre, edad, frecuencia_cardiaca) VALUES (?, ?, ?)';
+  connection.query(query, [name, age, heart_rate], (err, result) => {
+    if (err) return res.redirect('/error.html');
+    res.redirect(`/submit.html?nombre=${encodeURIComponent(name)}`);
+  });
+});
+
+// Insertar médico
+app.post('/insertar-medico', requireLogin,requireRole(['medico','admin' ]), (req, res) => {
+  const { medico_name, especialidad } = req.body;
+  const query = 'INSERT INTO medicos (nombre, especialidad) VALUES (?, ?)';
+  connection.query(query, [medico_name.trim(), especialidad.trim()], (err, result) => {
+    if (err) return res.redirect('/error-med.html');
+    res.redirect(`/success.html?nombre=${encodeURIComponent(medico_name.trim())}`);
+  });
+});
+
+// Ver pacientes
+app.get('/pacientes', requireLogin, requireRole(['medico','admin' ]),(req, res) => {
+  connection.query('SELECT * FROM pacientes', (err, results) => {
+    if (err) return res.send('Error al obtener los datos.');
+    let html = `
+      <html>
+      <head>
+        <link rel="stylesheet" href="/styles.css">
+        <title>Pacientes</title>
+      </head>
+      <body>
+        <h1>Pacientes Registrados</h1>
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Edad</th>
+              <th>Frecuencia Cardiaca (bpm)</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+    results.forEach(paciente => {
+      html += `
+        <tr>
+          <td>${paciente.nombre}</td>
+          <td>${paciente.edad}</td>
+          <td>${paciente.frecuencia_cardiaca}</td>
+        </tr>
+      `;
+    });
+    html += `
+          </tbody>
+        </table>
+        <button onclick="window.location.href='/'">Volver</button>
+      </body>
+      </html>
+    `;
+    res.send(html);
+  });
+});
+
+// Ver médicos
+app.get('/medicos', requireLogin, requireRole(['medico','admin' ]),(req, res) => {
+  connection.query('SELECT * FROM medicos', (err, results) => {
+    if (err) return res.send('Error al obtener los datos.');
+    let html = `
+      <html>
+      <head>
+        <link rel="stylesheet" href="/styles.css">
+        <title>Medicos</title>
+      </head>
+      <body>
+        <h1>Medicos disponibles</h1>
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Especialidad</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+    results.forEach(medico => {
+      html += `
+        <tr>
+          <td>${medico.nombre}</td>
+          <td>${medico.especialidad}</td>
+        </tr>
+      `;
+    });
+    html += `
+          </tbody>
+        </table>
+        <button onclick="window.location.href='/'">Volver</button>
+      </body>
+      </html>
+    `;
+    res.send(html);
+  });
+});
+
+// Buscar pacientes
+app.get('/buscar-pacientes', requireLogin,requireRole(['medico','admin' ]), (req, res) => {
+  const { name_search, age_search } = req.query;
+  let query = 'SELECT * FROM pacientes WHERE 1=1';
+  if (name_search) query += ` AND nombre LIKE '%${name_search}%'`;
+  if (age_search) query += ` AND edad = ${age_search}`;
+  connection.query(query, (err, results) => {
+    if (err) return res.send('Error al obtener los datos.');
+    let html = `
+      <html>
+      <head>
+        <link rel="stylesheet" href="/styles.css">
+        <title>Resultados de Búsqueda</title>
+      </head>
+      <body>
+        <h1>Resultados de Búsqueda</h1>
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Edad</th>
+              <th>Frecuencia Cardiaca (bpm)</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+    results.forEach(paciente => {
+      html += `
+        <tr>
+          <td>${paciente.nombre}</td>
+          <td>${paciente.edad}</td>
+          <td>${paciente.frecuencia_cardiaca}</td>
+        </tr>
+      `;
+    });
+    html += `
+          </tbody>
+        </table>
+        <button onclick="window.location.href='/'">Volver</button>
+      </body>
+      </html>
+    `;
+    res.send(html);
+  });
+});
+
+// Ordenar pacientes
+app.get('/ordenar-pacientes', requireLogin, requireRole(['medico','admin' ]),(req, res) => {
+  const query = 'SELECT * FROM pacientes ORDER BY frecuencia_cardiaca DESC';
+  connection.query(query, (err, results) => {
+    if (err) return res.send('Error al obtener los datos.');
+    let html = `
+      <html>
+      <head>
+        <link rel="stylesheet" href="/styles.css">
+        <title>Pacientes Ordenados</title>
+      </head>
+      <body>
+        <h1>Pacientes Ordenados por Frecuencia Cardiaca</h1>
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th>Edad</th>
+              <th>Frecuencia Cardiaca (bpm)</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+    results.forEach(paciente => {
+      html += `
+        <tr>
+          <td>${paciente.nombre}</td>
+          <td>${paciente.edad}</td>
+          <td>${paciente.frecuencia_cardiaca}</td>
+        </tr>
+      `;
+    });
+    html += `
+          </tbody>
+        </table>
+        <button onclick="window.location.href='/'">Volver</button>
+      </body>
+      </html>
+    `;
+    res.send(html);
+  });
+});
+
+app.post('/registrar', (req, res) => {
+    const { username, password, codigo_acceso } = req.body;
+
+    const query = 'SELECT tipo_usuario FROM codigos_acceso WHERE codigo = ?';
+    connection.query(query, [codigo_acceso], (err, results) => {
+        if (err || results.length === 0) {
+            return res.send('Código de acceso inválido');
+        }
+
+        const tipo_usuario = results[0].tipo_usuario;
+        const hashedPassword = bcrypt.hashSync(password, 10);
+
+        const insertUser = 'INSERT INTO usuarios (nombre_usuario, password_hash, tipo_usuario) VALUES (?, ?, ?)';
+        connection.query(insertUser, [username, hashedPassword, tipo_usuario], (err) => {
+            if (err) return res.send('Error al registrar usuario');
+            res.redirect('/login.html');
+        });
+    });
+});
+
+// Login
+app.post('/login', (req, res) => {
+  const { nombre_usuario, password } = req.body;
+
+  // Consulta al usuario
+  const query = 'SELECT * FROM usuarios WHERE nombre_usuario = ?';
+  connection.query(query, [nombre_usuario], async (err, results) => {
+    if (err) {
+      return res.send('Error al obtener el usuario');
+    }
+
+    if (results.length === 0) {
+      return res.redirect('/error2.html'); // Usuario no encontrado
+    }
+
+    const user = results[0];
+    const match = await bcrypt.compare(password, user.password_hash);
+
+    if (!match) {
+      return res.redirect('/errror3.html'); // Contraseña incorrecta
+    }
+
+    // Guarda la información en la sesión (aunque no uses tipo_usuario)
+    req.session.user = {
+      id: user.id,
+      nombre_usuario: user.nombre_usuario,
+      tipo_usuario: user.tipo_usuario || 'normal' // si no tienes este campo, se asigna 'normal'
+    };
+
+    // Redirige al inicio
+    res.redirect('/');
+  });
+});
+// Ruta para obtener el tipo de usuario actual
+app.get('/tipo-usuario', requireLogin, (req, res) => {
+    res.json({ tipo_usuario: req.session.user.tipo_usuario });
+});
+//menuu
+app.get('/menu', (req, res) => {
+  const menuItems = [
+    { nombre: 'Inicio', url: '/index.html' },
+    { nombre: 'Equipos', url: '/equipos.html' },
+    { nombre: 'Usuarios', url: '/usuarios.html' },
+    { nombre: 'Búsqueda', url: '/busqueda.html' }
+  ];
+  res.json(menuItems);
+});
+//busqueda
+app.get('/buscar', (req, res) => {
+  const query = req.query.query;
+  const sql = `SELECT nombre_usuario, tipo_usuario FROM usuarios WHERE nombre_usuario LIKE ?`;
+  connection.query(sql, [`%${query}%`], (err, results) => {
+    if (err) throw err;
+    res.json(results);
+  });
+});
+
+//ruta para manejarrj
+const upload = multer({ dest: 'uploads/' });
+
+app.post('/upload', upload.single('excelFile'), (req, res) => {
+  const filePath = req.file.path;
+  const workbook = xlsx.readFile(filePath);
+  const sheetName = workbook.SheetNames[0];
+  const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+  data.forEach(row => {
+    const { nombre, descripcion } = row;
+    const sql = `INSERT INTO equipos (nombre, descripcion) VALUES (?, ?)`;
+    connection.query(sql, [nombre, descripcion], err => {
+      if (err) throw err;
+    });
+  });
+
+  res.send('<h1>Archivo cargado y datos guardados</h1><a href="/equipos.html">Volver</a>');
+});
+//ruta descarga
+app.get('/download', (req, res) => {
+  const sql = `SELECT * FROM equipos`;
+  connection.query(sql, (err, results) => {
+    if (err) throw err;
+
+    const worksheet = xlsx.utils.json_to_sheet(results);
+    const workbook = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'Equipos');
+
+    const filePath = path.join(__dirname, 'uploads', 'equipos.xlsx');
+    xlsx.writeFile(workbook, filePath);
+    res.download(filePath, 'equipos.xlsx');
+  });
+});
+
+//excel de medicos 
+// ------------------- SUBIR DOCTORES DESDE EXCEL -------------------
+
+app.post('/upload-medicos', upload.single('excelFile'), (req, res) => {
+  const filePath = req.file.path;
+  const workbook = xlsx.readFile(filePath);
+  const sheetName = workbook.SheetNames[0];
+  const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+  data.forEach(row => {
+    const { nombre, especialidad } = row;
+    const sql = `INSERT INTO medicos (nombre, especialidad) VALUES (?, ?)`;
+    connection.query(sql, [nombre, especialidad], err => {
+      if (err) console.error('Error al guardar doctor:', err);
+    });
+  });
+
+  res.send('<h1>Archivo cargado y doctores guardados</h1><a href="/medicos.html">medicos</a>');
+});
+//descargar excel medicos
+app.get('/download-medicos', (req, res) => {
+  const sql = `SELECT * FROM medicos`;
+  connection.query(sql, (err, results) => {
+    if (err) throw err;
+
+    const worksheet = xlsx.utils.json_to_sheet(results);
+    const workbook = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'medicos');
+
+    const filePath = path.join(__dirname, 'uploads', 'medicos.xlsx');
+    xlsx.writeFile(workbook, filePath);
+    res.download(filePath, 'medicos.xlsx');
+  });
+});
+// ------------------- SUBIR PACIENTES DESDE EXCEL -------------------
+app.post('/upload-pacientes', upload.single('excelFile'), (req, res) => {
+  const filePath = req.file.path;
+  const workbook = xlsx.readFile(filePath);
+  const sheetName = workbook.SheetNames[0];
+  const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+
+  data.forEach(row => {
+    const { nombre, edad, frecuencia_cardiaca } = row;
+    const sql = `INSERT INTO pacientes (nombre, edad, frecuencia_cardiaca) VALUES (?, ?, ?)`;
+    connection.query(sql, [nombre, edad, frecuencia_cardiaca], err => {
+      if (err) console.error('❌ Error al guardar paciente:', err);
+    });
+  });
+
+  res.send('<h1>✅ Archivo cargado y pacientes guardados</h1><a href="/pacientes.html">Ver pacientes</a>');
+});
+
+// ------------------- DESCARGAR PACIENTES A EXCEL -------------------
+app.get('/download-pacientes', (req, res) => {
+  const sql = `SELECT * FROM pacientes`;
+  connection.query(sql, (err, results) => {
+    if (err) throw err;
+
+    const worksheet = xlsx.utils.json_to_sheet(results);
+    const workbook = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'Pacientes');
+
+    const filePath = path.join(__dirname, 'uploads', 'pacientes.xlsx');
+    xlsx.writeFile(workbook, filePath);
+    res.download(filePath, 'pacientes.xlsx');
+  });
+});
+// ------------------- BÚSQUEDA EN TIEMPO REAL DE MÉDICOS -------------------
+app.get('/buscar-medicos', (req, res) => {
+  const query = req.query.query;
+
+  const sql = `
+    SELECT nombre, especialidad 
+    FROM medicos 
+    WHERE nombre LIKE ? OR especialidad LIKE ?
+  `;
+
+  connection.query(sql, [`%${query}%`, `%${query}%`], (err, results) => {
+    if (err) {
+      console.error('Error al buscar médicos:', err);
+      return res.status(500).json({ error: 'Error en el servidor' });
+    }
+    res.json(results);
+  });
+});
+// ------------------- VER USUARIOS -------------------
+app.get('/usuarios', (req, res) => {
+  connection.query('SELECT id, nombre_usuario, tipo_usuario FROM usuarios', (err, results) => {
+    if (err) {
+      console.error('Error al obtener usuarios:', err);
+      res.status(500).send('Error en el servidor');
+    } else {
+      res.json(results);
+    }
+  });
+});
+
+// Mostrar la página de gestión de usuarios (para el menú "Gestionar Registros")
+app.get('/gestionar-registros', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'gestionar_usuarios.html'));
+});
+// ✅ Actualizar usuario por ID
+app.put('/usuarios/:id', (req, res) => {
+  const id = req.params.id;
+  const { nombre_usuario, tipo_usuario } = req.body;
+
+  const query = 'UPDATE usuarios SET nombre_usuario = ?, tipo_usuario = ? WHERE id = ?';
+  connection.query(query, [nombre_usuario, tipo_usuario, id], (err, result) => {
+    if (err) {
+      console.error('❌ Error al actualizar usuario:', err);
+      res.status(500).json({ message: 'Error al actualizar el usuario' });
+    } else if (result.affectedRows === 0) {
+      res.status(404).json({ message: 'Usuario no encontrado' });
+    } else {
+      res.json({ message: '✅ Usuario actualizado correctamente' });
+    }
+  });
+});
+//mante
+app.get('/mantenimientos', requireLogin, requireRole(['administrador','tecnico','consulta']), (req, res) => {
+  const sql = `
+    SELECT m.*, e.nombre AS nombre_equipo
+    FROM mantenimientos m
+    JOIN equipos e ON m.equipo_id = e.id
+    ORDER BY m.fecha_programada ASC
+  `;
+  connection.query(sql, (err, results) => {
+    if (err) {
+      console.error('Error al obtener mantenimientos:', err);
+      return res.send('Error al obtener mantenimientos');
+    }
+
+    // Por ahora, devuelve HTML simple. Luego le metemos estilo bonito.
+    let html = `
+      <html>
+      <head>
+        <link rel="stylesheet" href="/styles.css">
+        <title>Mantenimientos</title>
+      </head>
+      <body>
+        <h1>Listado de Mantenimientos</h1>
+       <table>
+       <thead>
+        <tr>
+         <th>Equipo</th>
+         <th>Fecha programada</th>
+         <th>Fecha realizada</th>
+         <th>Estado</th>
+         <th>Observaciones</th>
+         <th>Acciones</th>   <!-- 🔥 NUEVA COLUMNA -->
+        </tr>
+         </thead>
+          <tbody>
+    `;
+
+results.forEach(m => {
+  html += `
+    <tr>
+      <td>${m.nombre_equipo}</td>
+      <td>${m.fecha_programada?.toISOString().split('T')[0]}</td>
+      <td>${m.fecha_realizada ? m.fecha_realizada.toISOString().split('T')[0] : '-'}</td>
+      <td>${m.estado}</td>
+      <td>${m.observaciones || ''}</td>
+      <td>
+        <a href="/mantenimientos/editar/${m.id}" style="color:#00bcd4;">✏️ Editar</a>
+      </td>
+    </tr>
+  `;
+});
+
+
+    html += `
+          </tbody>
+        </table>
+        <button onclick="window.location.href='/'">Volver al inicio</button>
+      </body>
+      </html>
+    `;
+
+    res.send(html);
+  });
+});
+app.get('/mantenimientos/nuevo', requireLogin, requireRole(['administrador']), (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'nuevo_mantenimiento.html'));
+});
+//
+app.post('/mantenimientos/nuevo', requireLogin, requireRole(['administrador']), (req, res) => {
+  const { equipo_id, fecha_programada, observaciones } = req.body;
+  const sql = `
+    INSERT INTO mantenimientos (equipo_id, fecha_programada, estado, observaciones)
+    VALUES (?, ?, 'pendiente', ?)
+  `;
+  connection.query(sql, [equipo_id, fecha_programada, observaciones], (err) => {
+    if (err) {
+      console.error('Error al crear mantenimiento:', err);
+      return res.send('Error al crear mantenimiento');
+    }
+    res.redirect('/mantenimientos');
+  });
+});
+//reportes
+app.get('/reportes/mantenimientos', requireLogin, requireRole(['administrador','tecnico']), (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'reportes_mantenimientos.html'));
+});
+const ExcelJS = require('exceljs');
+
+app.get('/reportes/mantenimientos/excel', requireLogin, requireRole(['administrador','tecnico']), async (req, res) => {
+  const sql = `
+    SELECT m.*, e.nombre AS nombre_equipo
+    FROM mantenimientos m
+    JOIN equipos e ON m.equipo_id = e.id
+  `;
+
+  connection.query(sql, async (err, results) => {
+    if (err) return res.send('Error al generar Excel');
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Mantenimientos');
+
+    sheet.columns = [
+      { header: 'Equipo', key: 'equipo', width: 20 },
+      { header: 'Fecha Programada', key: 'fecha_p', width: 20 },
+      { header: 'Fecha Realizada', key: 'fecha_r', width: 20 },
+      { header: 'Estado', key: 'estado', width: 15 },
+      { header: 'Observaciones', key: 'obs', width: 30 },
+    ];
+
+    results.forEach(m => {
+      sheet.addRow({
+        equipo: m.nombre_equipo,
+        fecha_p: m.fecha_programada,
+        fecha_r: m.fecha_realizada || '-',
+        estado: m.estado,
+        obs: m.observaciones || '',
+      });
+    });
+
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="mantenimientos.xlsx"'
+    );
+
+    await workbook.xlsx.write(res);
+    res.end();
+  });
+});
+const PDFDocument = require('pdfkit');
+
+app.get('/reportes/mantenimientos/pdf', requireLogin, requireRole(['administrador','tecnico']), (req, res) => {
+  const sql = `
+    SELECT m.*, e.nombre AS nombre_equipo
+    FROM mantenimientos m
+    JOIN equipos e ON m.equipo_id = e.id
+  `;
+
+  connection.query(sql, (err, results) => {
+    if (err) return res.send('Error al generar PDF');
+
+    const doc = new PDFDocument();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="mantenimientos.pdf"');
+
+    doc.fontSize(18).text('Reporte de Mantenimientos', { align: 'center' });
+    doc.moveDown();
+
+    results.forEach(m => {
+      doc.fontSize(12).text(`Equipo: ${m.nombre_equipo}`);
+      doc.text(`Fecha programada: ${m.fecha_programada}`);
+      doc.text(`Fecha realizada: ${m.fecha_realizada || '-'}`);
+      doc.text(`Estado: ${m.estado}`);
+      doc.text(`Observaciones: ${m.observaciones || ''}`);
+      doc.moveDown();
+    });
+
+    doc.pipe(res);
+    doc.end();
+  });
+});
+app.get('/mantenimientos/editar/:id', requireLogin, requireRole(['administrador','tecnico']), (req, res) => {
+  const id = req.params.id;
+  const sql = `SELECT * FROM mantenimientos WHERE id = ?`;
+
+  connection.query(sql, [id], (err, results) => {
+    if (err || results.length === 0) return res.send("Mantenimiento no encontrado");
+
+    const m = results[0];
+
+    const html = `
+      <html>
+      <head>
+        <link rel="stylesheet" href="/styles.css">
+        <title>Editar Mantenimiento</title>
+      </head>
+      <body>
+        <h1>Editar Mantenimiento</h1>
+
+        <form method="POST" action="/mantenimientos/editar/${id}">
+          <label>Fecha realizada:</label>
+          <input type="date" name="fecha_realizada" value="${m.fecha_realizada ? m.fecha_realizada.toISOString().split('T')[0] : ''}">
+
+          <label>Estado:</label>
+          <select name="estado">
+            <option value="pendiente" ${m.estado === 'pendiente' ? 'selected' : ''}>Pendiente</option>
+            <option value="en_proceso" ${m.estado === 'en_proceso' ? 'selected' : ''}>En proceso</option>
+            <option value="completado" ${m.estado === 'completado' ? 'selected' : ''}>Completado</option>
+          </select>
+
+          <label>Observaciones:</label>
+          <textarea name="observaciones">${m.observaciones || ''}</textarea>
+
+          <button type="submit">Guardar cambios</button>
+        </form>
+
+        <button onclick="window.location.href='/mantenimientos'">Volver</button>
+      </body>
+      </html>
+    `;
+
+    res.send(html);
+  });
+});
+
+app.post('/mantenimientos/editar/:id', requireLogin, requireRole(['administrador','tecnico']), (req, res) => {
+  const id = req.params.id;
+  const { fecha_realizada, estado, observaciones } = req.body;
+
+  const sql = `
+    UPDATE mantenimientos
+    SET fecha_realizada = ?, estado = ?, observaciones = ?
+    WHERE id = ?
+  `;
+
+  connection.query(sql, [fecha_realizada, estado, observaciones, id], (err) => {
+    if (err) {
+      console.error("Error al actualizar:", err);
+      return res.send("Error al actualizar");
+    }
+
+    res.redirect('/mantenimientos');
+  });
+});
+app.get('/equipos/:id', requireLogin, requireRole(['administrador','tecnico','consulta']), (req, res) => {
+  const equipoId = req.params.id;
+
+  const sqlEquipo = `SELECT * FROM equipos WHERE id = ?`;
+  const sqlMantenimientos = `
+    SELECT * FROM mantenimientos 
+    WHERE equipo_id = ?
+    ORDER BY fecha_programada DESC
+  `;
+
+  connection.query(sqlEquipo, [equipoId], (err, equipo) => {
+    if (err || equipo.length === 0) {
+      return res.send("Equipo no encontrado.");
+    }
+
+    connection.query(sqlMantenimientos, [equipoId], (err2, mantenimientos) => {
+      if (err2) return res.send("Error obteniendo historial.");
+
+      let html = `
+        <html>
+        <head>
+          <link rel="stylesheet" href="/styles.css">
+          <title>Ficha del equipo</title>
+        </head>
+        <body>
+          <h1>Ficha del equipo</h1>
+
+          <h2>${equipo[0].nombre}</h2>
+          <p><strong>Marca:</strong> ${equipo[0].marca}</p>
+          <p><strong>Modelo:</strong> ${equipo[0].modelo}</p>
+          <p><strong>Serie:</strong> ${equipo[0].num_serie}</p>
+          <p><strong>Ubicación:</strong> ${equipo[0].ubicacion}</p>
+
+          <hr>
+          <h3>Historial de Mantenimientos</h3>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Fecha Programada</th>
+                <th>Fecha Realizada</th>
+                <th>Estado</th>
+                <th>Observaciones</th>
+              </tr>
+            </thead>
+            <tbody>
+      `;
+
+      mantenimientos.forEach(m => {
+        html += `
+          <tr>
+            <td>${m.fecha_programada?.toISOString().split('T')[0]}</td>
+            <td>${m.fecha_realizada ? m.fecha_realizada.toISOString().split('T')[0] : '-'}</td>
+            <td>${m.estado}</td>
+            <td>${m.observaciones || ''}</td>
+          </tr>
+        `;
+      });
+
+      html += `
+            </tbody>
+          </table>
+
+          <button onclick="window.location.href='/equipos.html'">Volver</button>
+        </body>
+        </html>
+      `;
+
+      res.send(html);
+    });
+  });
+});
+app.get('/reportes', (req, res) => {
+    if(req.usuario.rol !== 'admin') {
+        return res.redirect('/acceso_denegado.html'); // redirige a la página bonita
+    }
+    res.render('reportes'); // si tiene acceso
+});
+app.get('/equipos/:id', requireLogin, requireRole(['administrador','tecnico','consulta']), (req, res) => {
+  const equipoId = req.params.id;
+
+  // Datos del equipo
+  const sqlEquipo = `SELECT * FROM equipos WHERE id = ?`;
+  // Historial de mantenimientos
+  const sqlMantenimientos = `SELECT * FROM mantenimientos WHERE equipo_id = ? ORDER BY fecha_programada DESC`;
+
+  connection.query(sqlEquipo, [equipoId], (err, equipo) => {
+    if (err || equipo.length === 0) return res.send("Equipo no encontrado.");
+
+    connection.query(sqlMantenimientos, [equipoId], (err2, mantenimientos) => {
+      if (err2) return res.send("Error obteniendo historial.");
+
+      // HTML que muestra ficha y bitácora
+      let html = `
+        <html>
+        <head>
+          <link rel="stylesheet" href="/styles.css">
+          <title>Ficha del equipo</title>
+        </head>
+        <body>
+          <h1>Ficha del equipo: ${equipo[0].nombre}</h1>
+          <p><strong>Marca:</strong> ${equipo[0].marca}</p>
+          <p><strong>Modelo:</strong> ${equipo[0].modelo}</p>
+          <p><strong>Serie:</strong> ${equipo[0].num_serie}</p>
+          <p><strong>Ubicación:</strong> ${equipo[0].ubicacion}</p>
+
+          <h3>Historial de Mantenimientos</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Fecha Programada</th>
+                <th>Fecha Realizada</th>
+                <th>Estado</th>
+                <th>Observaciones</th>
+              </tr>
+            </thead>
+            <tbody>
+      `;
+
+      mantenimientos.forEach(m => {
+        html += `
+          <tr>
+            <td>${m.fecha_programada?.toISOString().split('T')[0]}</td>
+            <td>${m.fecha_realizada ? m.fecha_realizada.toISOString().split('T')[0] : '-'}</td>
+            <td>${m.estado}</td>
+            <td>${m.observaciones || ''}</td>
+          </tr>
+        `;
+      });
+
+      html += `
+            </tbody>
+          </table>
+          <button onclick="window.location.href='/equipos.html'">Volver</button>
+        </body>
+        </html>
+      `;
+      res.send(html);
+    });
+  });
+});
+app.get('/equipos-lista', requireLogin, requireRole(['administrador','tecnico','consulta']), (req, res) => {
+  const sql = 'SELECT * FROM equipos';
+  connection.query(sql, (err, results) => {
+    if (err) return res.status(500).json({ error: 'Error al obtener equipos' });
+    res.json(results);
+  });
+});
+// Crear un nuevo equipo
+app.post('/equipos', requireLogin, requireRole(['administrador','tecnico']), (req, res) => {
+  const { nombre, marca, modelo, num_serie } = req.body;
+  const sql = 'INSERT INTO equipos (nombre, marca, modelo, num_serie) VALUES (?, ?, ?, ?)';
+  connection.query(sql, [nombre, marca, modelo, num_serie], (err, result) => {
+    if (err) return res.status(500).json({ error: 'Error creando equipo' });
+    res.json({ id: result.insertId, nombre, marca, modelo, num_serie });
+  });
+});
+
+// Actualizar un equipo existente
+app.put('/equipos/:id', requireLogin, requireRole(['administrador','tecnico']), (req, res) => {
+  const { id } = req.params;
+  const { nombre, marca, modelo, num_serie } = req.body;
+  const sql = 'UPDATE equipos SET nombre = ?, marca = ?, modelo = ?, num_serie = ? WHERE id = ?';
+  connection.query(sql, [nombre, marca, modelo, num_serie, id], (err) => {
+    if (err) return res.status(500).json({ error: 'Error actualizando equipo' });
+    res.json({ id, nombre, marca, modelo, num_serie });
+  });
+});
+
+// Eliminar equipo
+app.delete('/equipos/:id', requireLogin, requireRole(['administrador','tecnico']), (req, res) => {
+  const { id } = req.params;
+  const sql = 'DELETE FROM equipos WHERE id = ?';
+  connection.query(sql, [id], (err) => {
+    if (err) return res.status(500).json({ error: 'Error eliminando equipo' });
+    res.json({ message: 'Equipo eliminado correctamente' });
+  });
+});
+
+// Logout,
+app.get('/logout', (req, res) => {
+  req.session.destroy();
+  res.redirect('/login.html');
+});
+
+// ------------INICIAR SERVIDOR -----------------
+app.listen(port, () => {
+  console.log(`Servidor corriendo en http://localhost:${port}`);
+});
