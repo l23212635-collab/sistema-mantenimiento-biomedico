@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Sistema de Mantenimiento Biomédico</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f4f4f4;
+      padding: 40px;
+    }
+    .container {
+      background: white;
+      padding: 30px;
+      max-width: 900px;
+      margin: auto;
+      border-radius: 8px;
+    }
+    h1, h2 {
+      color: #003366;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Sistema Integral para Administración de Mantenimiento Preventivo Biomédico</h1>
+
+    <p><strong>Alumno:</strong> Pérez García Diego</p>
+    <p><strong>Carrera:</strong> Ingeniería Biomédica</p>
+    <p><strong>Materia:</strong> Tecnología de Bases de Datos</p>
+
+    <h2>Descripción</h2>
+    <p>
+      Plataforma web desarrollada como proyecto final para la gestión del
+      mantenimiento preventivo de equipos biomédicos.
+    </p>
+
+    <h2>Funciones principales</h2>
+    <ul>
+      <li>Gestión de usuarios y roles</li>
+      <li>Registro de equipos biomédicos</li>
+      <li>Historial de mantenimiento</li>
+      <li>Búsqueda en tiempo real</li>
+      <li>Reportes en Excel</li>
+    </ul>
+  </div>
+</body>
+</html>
